@@ -9,9 +9,9 @@ from sqlmodel import select
 from google.cloud import pubsub_v1
 
 # Import the shared code from your PyPI package
-from pto-common.database import init_db, get_session
-from pto-common.models import PTO
-from pto-common.utils.dashboard_events import build_dashboard_payload
+from pto_common_timesheet_mfdenison_hopkinsep.database import init_db, get_session
+from pto_common_timesheet_mfdenison_hopkinsep.models import PTO
+from pto_common_timesheet_mfdenison_hopkinsep.utils.dashboard_events import build_dashboard_payload
 
 # Configure logging
 logger = logging.getLogger("bulk_pto_lookup")
