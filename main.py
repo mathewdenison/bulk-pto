@@ -1,74 +1,67 @@
-import base64
+# main.py
+import os
 import json
 import logging
+import base64
 
+from flask import Request
+from sqlmodel import select
 from google.cloud import pubsub_v1
-from google.cloud import logging as cloud_logging
 
-# Import your Django model and any helper functions.
-# Ensure your Cloud Function environment is set up to load your Django settings if needed.
-from pto_update.models import PTO
-from utils.dashboard_events import build_dashboard_payload
+# Import the shared code from your PyPI package
+from pto-common.database import init_db, get_session
+from pto-common.models import PTO
+from pto-common.utils.dashboard_events import build_dashboard_payload
 
-# Initialize Cloud Logging (Cloud Functions automatically integrates with Cloud Logging,
-# but this call ensures that logs are formatted consistently)
-cloud_logging_client = cloud_logging.Client()
-cloud_logging_client.setup_logging()
-
+# Configure logging
 logger = logging.getLogger("bulk_pto_lookup")
 logger.setLevel(logging.INFO)
 
-# GCP configuration – set your project and topic values
-project_id = "hopkinstimesheetproj"
-dashboard_topic = f"projects/{project_id}/topics/dashboard-queue"
-
-# Initialize the Pub/Sub publisher client
+# Pub/Sub configuration – set these via environment variables or default values
+PROJECT_ID = os.environ.get("PROJECT_ID", "hopkinstimesheetproj")
+DASHBOARD_TOPIC = f"projects/{PROJECT_ID}/topics/dashboard-queue"
 publisher = pubsub_v1.PublisherClient()
 
-def bulk_pto_lookup(event, context):
+# Initialize the database on cold start
+init_db()
+
+def bulk_pto_lookup(request: Request):
     """
-    Cloud Function to process a bulk PTO lookup message.
-    Triggered from a message published to a Pub/Sub topic.
-    
-    Args:
-        event (dict): The dictionary with data specific to this event. The Pub/Sub message data 
-                      is in the 'data' field as a base64 encoded string.
-        context (google.cloud.functions.Context): Metadata of triggering event.
+    HTTP-triggered Cloud Function to perform a bulk PTO lookup,
+    build a dashboard payload and publish it to a Pub/Sub topic.
     """
     try:
-        # Decode the Pub/Sub message data from Base64
-        if 'data' in event:
-            data_str = base64.b64decode(event['data']).decode('utf-8')
-            data = json.loads(data_str)
-        else:
-            logger.error("No data found in the Pub/Sub message.")
-            return
+        if request.method != "POST":
+            return ("Method Not Allowed", 405)
 
-        logger.info("Received bulk PTO lookup message.")
-        logger.info(f"Bulk PTO lookup trigger payload: {data}")
+        data = request.get_json(silent=True) or {}
+        logger.info("Received bulk PTO lookup request.")
+        logger.info(f"Payload: {data}")
 
-        # Retrieve all PTO objects from the database.
-        all_pto = PTO.objects.all()
-        pto_list = [{"employee_id": p.employee_id, "pto_balance": p.balance} for p in all_pto]
+        # Obtain a database session
+        session = get_session()
+
+        # Query all PTO records from the database
+        pto_records = session.exec(select(PTO)).all()
+        pto_list = [{"employee_id": p.employee_id, "pto_balance": p.balance} for p in pto_records]
         msg_str = f"Bulk PTO lookup: found {len(pto_list)} records."
         logger.info(msg_str)
 
-        # Build a dashboard payload containing all PTO records.
+        # Build the dashboard payload using the shared utility function
         payload = build_dashboard_payload(
-            "all",               # Special identifier for bulk messages.
-            "bulk_pto_lookup",   # Type of the message
+            "all",               # Identifier for a bulk lookup
+            "bulk_pto_lookup",   # The event type
             msg_str,
             {"pto_records": pto_list}
         )
 
-        # Publish the dashboard payload to the dashboard topic.
-        future = publisher.publish(dashboard_topic, json.dumps(payload).encode("utf-8"))
-        # Optionally, wait for the publish to complete.
-        future.result()
-        logger.info("Published bulk PTO lookup update to dashboard topic.")
+        # Publish the payload to the dashboard topic on Pub/Sub
+        future = publisher.publish(DASHBOARD_TOPIC, json.dumps(payload).encode("utf-8"))
+        future.result()  # Optionally wait until the publishing is complete
+        logger.info("Published dashboard update to Pub/Sub.")
 
-        # If no exception is raised, Cloud Functions automatically acknowledges the message.
+        return (json.dumps({"status": "success", "message": msg_str}), 200)
+
     except Exception as e:
-        logger.exception(f"Error processing bulk PTO lookup message: {str(e)}")
-        # Raising the exception will signal the function execution failure so Pub/Sub can re-deliver.
-        raise
+        logger.exception(f"Error during bulk PTO lookup: {str(e)}")
+        return (json.dumps({"status": "error", "message": str(e)}), 500)
